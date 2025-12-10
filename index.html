@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8" />
+<title>Face Register - 增强版</title>
+<script defer src="https://unpkg.com/face-api.js@0.22.2/dist/face-api.min.js"></script>
+<style>
+body { font-family: Arial; text-align: center; margin-top: 30px; }
+#video { width: 300px; border-radius: 10px; }
+#output { width: 90%; height: 300px; margin: 10px 0; font-family: monospace; }
+#status { color: #666; margin: 10px 0; font-weight: bold; }
+.loading { color: blue; }
+.success { color: green; }
+.error { color: red; }
+canvas { position: absolute; top: 0; left: 0; z-index: 10; }
+.video-container { position: relative; display: inline-block; margin: 20px; }
+.instructions { 
+    background: #f5f5f5; 
+    padding: 15px; 
+    border-radius: 8px; 
+    margin: 20px auto; 
+    max-width: 600px;
+    text-align: left;
+}
+.angle-list { 
+    list-style: none; 
+    padding: 0;
+}
+.angle-list li { 
+    margin: 8px 0; 
+    padding: 5px;
+    background: white;
+    border-radius: 5px;
+}
+.current-angle {
+    background: #e3f2fd !important;
+    font-weight: bold;
+}
+.button-group { margin: 20px 0; }
+button { 
+    padding: 10px 20px; 
+    margin: 5px; 
+    font-size: 16px;
+    cursor: pointer;
+}
+#multiSnap { background: #4CAF50; color: white; border: none; }
+#singleSnap { background: #2196F3; color: white; border: none; }
+#resetBtn { background: #f44336; color: white; border: none; }
+button:disabled { background: #cccccc; cursor: not-allowed; }
+</style>
+</head>
+<body>
+
+<h2>人脸注册 - 增强版（多角度采集）</h2>
+
+<div class="instructions">
+    <h3>采集说明：</h3>
+    <p>为了获得更好的识别效果，请采集<b>5-7个不同角度</b>的人脸样本：</p>
+    <ul class="angle-list" id="angleList">
+        <li>1. 正面看向摄像头</li>
+        <li>2. 稍微向左转头 (约15度)</li>
+        <li>3. 稍微向右转头 (约15度)</li>
+        <li>4. 轻微抬头</li>
+        <li>5. 轻微低头</li>
+        <li>6. 微笑表情</li>
+        <li>7. 中性表情</li>
+    </ul>
+    <p id="currentInstruction">准备开始...</p>
+</div>
+
+<div class="video-container">
+    <video id="video" width="640" height="480" autoplay muted></video>
+</div>
+
+<div id="status" class="loading">正在加载 face-api.js 库...</div>
+
+<div class="button-group">
+    <button id="multiSnap" disabled>开始多角度采集 (推荐)</button>
+    <button id="singleSnap" disabled>单张采集 (旧方式)</button>
+    <button id="resetBtn" onclick="resetCollection()">重置采集</button>
+</div>
+
+<h3>Embedding JSON（复制到签到页的KNOWN_DATA）</h3>
+<textarea id="output" readonly></textarea>
+
+<script>
+// 全局变量
+let modelsLoaded = false;
+let isCollecting = false;
+let collectedEmbeddings = [];
+let currentAngle = 0;
+const ANGLES = [
+    { name: "正面", desc: "请正面看向摄像头", wait: 1000 },
+    { name: "左转", desc: "请稍微向左转头 (约15度)", wait: 800 },
+    { name: "右转", desc: "请稍微向右转头 (约15度)", wait: 800 },
+    { name: "抬头", desc: "请轻微抬头", wait: 800 },
+    { name: "低头", desc: "请轻微低头", wait: 800 },
+    { name: "微笑", desc: "请微笑一下", wait: 1000 },
+    { name: "中性", desc: "请保持中性表情", wait: 1000 }
+];
+
+// DOM 元素引用
+const videoElement = document.getElementById('video');
+const statusEl = document.getElementById('status');
+const outputEl = document.getElementById('output');
+const multiSnapBtn = document.getElementById('multiSnap');
+const singleSnapBtn = document.getElementById('singleSnap');
+const instructionEl = document.getElementById('currentInstruction');
+const angleListItems = document.querySelectorAll('#angleList li');
+
+// 按钮事件
+multiSnapBtn.onclick = startMultiAngleCollection;
+singleSnapBtn.onclick = captureSingleFace;
+
+// 页面加载后执行
+window.addEventListener('load', async () => {
+    try {
+        statusEl.textContent = '正在检查 face-api.js...';
+        
+        // 检查 faceapi 是否已加载
+        await checkFaceAPI();
+        
+        // 启动摄像头
+        await startCamera();
+        
+        // 加载模型
+        await loadModels();
+        
+        modelsLoaded = true;
+        multiSnapBtn.disabled = false;
+        singleSnapBtn.disabled = false;
+        statusEl.textContent = '✓ 准备就绪！建议使用"多角度采集"';
+        statusEl.className = 'success';
+        
+        console.log('增强版采集系统初始化完成');
+        
+    } catch (error) {
+        console.error('初始化失败:', error);
+        statusEl.textContent = '初始化失败: ' + error.message;
+        statusEl.className = 'error';
+    }
+});
+
+// 检查 faceapi 是否加载
+function checkFaceAPI() {
+    return new Promise((resolve, reject) => {
+        if (window.faceapi) {
+            console.log('faceapi 已加载');
+            resolve();
+            return;
+        }
+        
+        let attempts = 0;
+        const maxAttempts = 30;
+        const interval = setInterval(() => {
+            attempts++;
+            if (window.faceapi) {
+                clearInterval(interval);
+                console.log('faceapi 加载成功');
+                resolve();
+            } else if (attempts >= maxAttempts) {
+                clearInterval(interval);
+                reject(new Error('face-api.js 加载超时'));
+            }
+        }, 100);
+    });
+}
+
+// 启动摄像头
+async function startCamera() {
+    try {
+        statusEl.textContent = '正在请求摄像头权限...';
+        statusEl.className = 'loading';
+        
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+            video: { 
+                width: 640, 
+                height: 480,
+                facingMode: "user" 
+            } 
+        });
+        
+        videoElement.srcObject = stream;
+        
+        return new Promise((resolve) => {
+            videoElement.onloadedmetadata = () => {
+                videoElement.play();
+                console.log('摄像头启动完成');
+                statusEl.textContent = '摄像头已就绪';
+                resolve();
+            };
+        });
+    } catch (error) {
+        console.error('摄像头错误:', error);
+        throw new Error('无法访问摄像头: ' + error.message);
+    }
+}
+
+// 加载模型
+async function loadModels() {
+    try {
+        statusEl.textContent = '正在加载人脸检测模型...';
+        statusEl.className = 'loading';
+        
+        const MODEL_URL = "https://justadudewhohacks.github.io/face-api.js/models";
+        
+        console.log('开始加载模型...');
+        
+        await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+        await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+        await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+        
+        console.log('所有模型加载成功');
+        
+    } catch (error) {
+        console.error('模型加载失败:', error);
+        throw new Error('模型加载失败: ' + error.message);
+    }
+}
+
+// 开始多角度采集
+async function startMultiAngleCollection() {
+    if (!modelsLoaded || isCollecting) return;
+    
+    try {
+        isCollecting = true;
+        collectedEmbeddings = [];
+        currentAngle = 0;
+        multiSnapBtn.disabled = true;
+        singleSnapBtn.disabled = true;
+        
+        // 获取员工姓名
+        const userName = prompt("请输入员工姓名（英文或数字）:", "USER_" + new Date().getTime());
+        if (!userName) {
+            resetCollection();
+            return;
+        }
+        
+        // 开始采集循环
+        await collectNextAngle(userName);
+        
+    } catch (error) {
+        console.error('采集失败:', error);
+        statusEl.textContent = '采集失败: ' + error.message;
+        statusEl.className = 'error';
+        resetCollection();
+    }
+}
+
+// 采集下一个角度
+async function collectNextAngle(userName) {
+    if (currentAngle >= ANGLES.length) {
+        // 所有角度采集完成
+        finishCollection(userName);
+        return;
+    }
+    
+    const angle = ANGLES[currentAngle];
+    
+    // 更新UI提示
+    angleListItems.forEach((item, idx) => {
+        if (idx === currentAngle) {
+            item.classList.add('current-angle');
+        } else {
+            item.classList.remove('current-angle');
+        }
+    });
+    
+    instructionEl.textContent = `角度 ${currentAngle + 1}/${ANGLES.length}: ${angle.desc}`;
+    statusEl.textContent = `准备采集 ${angle.name} 角度...`;
+    statusEl.className = 'loading';
+    
+    // 等待用户调整姿势
+    await new Promise(resolve => setTimeout(resolve, angle.wait));
+    
+    try {
+        // 检测人脸
+        const options = new faceapi.TinyFaceDetectorOptions({
+            inputSize: 320,
+            scoreThreshold: 0.6  // 提高质量要求
+        });
+        
+        statusEl.textContent = `正在采集 ${angle.name} 角度...`;
+        
+        const detection = await faceapi
+            .detectSingleFace(videoElement, options)
+            .withFaceLandmarks()
+            .withFaceDescriptor();
+        
+        if (detection) {
+            if (detection.detection.score > 0.7) {
+                const emb = Array.from(detection.descriptor);
+                collectedEmbeddings.push(emb);
+                
+                // 显示质量分数
+                statusEl.textContent = `✓ ${angle.name} 角度采集成功 (质量: ${detection.detection.score.toFixed(3)})`;
+                statusEl.className = 'success';
+                
+                // 显示检测框
+                displayDetection(detection, `${angle.name} ✓`);
+                
+                // 延迟后继续下一个角度
+                setTimeout(() => {
+                    currentAngle++;
+                    collectNextAngle(userName);
+                }, 1500);
+                
+            } else {
+                statusEl.textContent = `⚠ ${angle.name} 角度质量较低 (${detection.detection.score.toFixed(3)})，请重新调整`;
+                statusEl.className = 'error';
+                // 重新尝试当前角度
+                setTimeout(() => collectNextAngle(userName), 2000);
+            }
+        } else {
+            statusEl.textContent = `未检测到人脸，请调整 ${angle.name} 角度`;
+            statusEl.className = 'error';
+            setTimeout(() => collectNextAngle(userName), 2000);
+        }
+        
+    } catch (error) {
+        console.error(`角度 ${angle.name} 采集失败:`, error);
+        statusEl.textContent = `${angle.name} 角度采集失败: ${error.message}`;
+        statusEl.className = 'error';
+        setTimeout(() => collectNextAngle(userName), 2000);
+    }
+}
+
+// 完成采集
+function finishCollection(userName) {
+    if (collectedEmbeddings.length < 3) {
+        alert(`采集失败！只收集到 ${collectedEmbeddings.length} 个有效样本。需要至少3个样本。`);
+        resetCollection();
+        return;
+    }
+    
+    // 生成增强版数据格式
+    const result = {
+        name: userName,
+        embeddings: collectedEmbeddings,  // 多个embedding！
+        sample_count: collectedEmbeddings.length,
+        collected_at: new Date().toISOString(),
+        angles_collected: ANGLES.slice(0, currentAngle).map(a => a.name),
+        average_quality: "high",
+        note: "增强版多角度采集数据"
+    };
+    
+    // 显示结果
+    outputEl.value = JSON.stringify(result, null, 2);
+    
+    statusEl.textContent = `✓ 采集完成！共 ${collectedEmbeddings.length} 个高质量样本`;
+    statusEl.className = 'success';
+    
+    instructionEl.textContent = `恭喜！${userName} 的多角度人脸数据已生成。请复制上方JSON数据到签到系统。`;
+    
+    // 重置按钮状态
+    multiSnapBtn.disabled = false;
+    singleSnapBtn.disabled = false;
+    isCollecting = false;
+    
+    // 移除所有高亮
+    angleListItems.forEach(item => item.classList.remove('current-angle'));
+    
+    alert(`采集成功！\n姓名: ${userName}\n样本数: ${collectedEmbeddings.length}\n请复制JSON数据到签到系统的KNOWN_DATA数组中。`);
+}
+
+// 单张采集（兼容旧方式）
+async function captureSingleFace() {
+    if (!modelsLoaded) {
+        alert('模型还未加载完成，请稍候...');
+        return;
+    }
+    
+    try {
+        statusEl.textContent = '正在检测人脸...';
+        statusEl.className = 'loading';
+        singleSnapBtn.disabled = true;
+        
+        const options = new faceapi.TinyFaceDetectorOptions({
+            inputSize: 320,
+            scoreThreshold: 0.5
+        });
+        
+        const detection = await faceapi
+            .detectSingleFace(videoElement, options)
+            .withFaceLandmarks()
+            .withFaceDescriptor();
+        
+        if (!detection) {
+            throw new Error('未检测到人脸');
+        }
+        
+        const emb = Array.from(detection.descriptor);
+        const userName = prompt("请输入员工姓名:", "TEST_USER");
+        
+        // 生成单样本数据（兼容旧格式）
+        const result = {
+            name: userName || "TEST_USER",
+            timestamp: new Date().toISOString(),
+            embedding_size: emb.length,
+            embedding: emb,
+            note: "单样本采集（建议使用多角度采集）"
+        };
+        
+        outputEl.value = JSON.stringify(result, null, 2);
+        
+        statusEl.textContent = '✓ Embedding 生成成功！';
+        statusEl.className = 'success';
+        
+        displayDetection(detection, "单张采集");
+        
+        alert("✓ Embedding 已生成！\n建议使用多角度采集以获得更好的识别效果。");
+        
+    } catch (error) {
+        console.error('检测错误:', error);
+        statusEl.textContent = '检测失败: ' + error.message;
+        statusEl.className = 'error';
+        alert("检测失败:\n" + error.message);
+    } finally {
+        singleSnapBtn.disabled = false;
+    }
+}
+
+// 显示检测框
+function displayDetection(detection, label = "") {
+    const oldCanvas = document.querySelector('canvas');
+    if (oldCanvas) oldCanvas.remove();
+    
+    const canvas = faceapi.createCanvasFromMedia(videoElement);
+    const container = document.querySelector('.video-container');
+    container.appendChild(canvas);
+    
+    const displaySize = { width: videoElement.width, height: videoElement.height };
+    faceapi.matchDimensions(canvas, displaySize);
+    
+    const resizedDetection = faceapi.resizeResults(detection, displaySize);
+    
+    faceapi.draw.drawDetections(canvas, [resizedDetection]);
+    faceapi.draw.drawFaceLandmarks(canvas, [resizedDetection]);
+    
+    // 添加标签
+    if (label) {
+        const ctx = canvas.getContext('2d');
+        ctx.font = '16px Arial';
+        ctx.fillStyle = '#00ff00';
+        ctx.fillText(label, resizedDetection.detection.box.x, resizedDetection.detection.box.y - 10);
+    }
+    
+    setTimeout(() => {
+        if (canvas.parentNode === container) canvas.remove();
+    }, 3000);
+}
+
+// 重置采集
+function resetCollection() {
+    isCollecting = false;
+    collectedEmbeddings = [];
+    currentAngle = 0;
+    multiSnapBtn.disabled = false;
+    singleSnapBtn.disabled = false;
+    statusEl.textContent = '采集已重置';
+    statusEl.className = 'success';
+    instructionEl.textContent = '准备开始新的采集...';
+    
+    angleListItems.forEach(item => item.classList.remove('current-angle'));
+    
+    console.log('采集已重置');
+}
+
+// 添加错误监听
+window.addEventListener('error', (e) => {
+    console.error('全局错误:', e.error);
+    if (statusEl) {
+        statusEl.textContent = '发生错误: ' + e.message;
+        statusEl.className = 'error';
+    }
+});
+
+// 添加页面卸载时的清理
+window.addEventListener('beforeunload', () => {
+    if (videoElement.srcObject) {
+        const tracks = videoElement.srcObject.getTracks();
+        tracks.forEach(track => track.stop());
+    }
+});
+</script>
+
+</body>
+</html>
